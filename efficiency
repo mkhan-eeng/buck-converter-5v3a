@@ -1,0 +1,98 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -------------------------------------------------------------
+# Operating conditions and component parameters
+# (same values used throughout the design — see Sections 4 and 8)
+# -------------------------------------------------------------
+V_in    = 12.0         # V, nominal input
+V_out   = 5.0          # V, output
+fsw     = 500e3        # Hz, switching frequency
+
+# Power-stage device parameters
+R_dson  = 0.092        # ohms, high-side FET on-resistance
+V_F     = 0.55         # V, Schottky forward voltage at full load
+t_sw    = 20e-9        # s, combined FET rise+fall transition time
+DCR     = 0.0191       # ohms, inductor DC resistance
+delta_iL = 0.757       # A, peak-to-peak inductor ripple (load-independent)
+R_esr_out = 1.5e-3     # ohms, output cap ESR
+R_esr_in  = 2.0e-3     # ohms, input cap ESR
+
+# Fixed losses (approximately load-independent)
+P_core  = 0.050        # W, inductor core loss (estimated)
+P_gate  = 0.018        # W, gate-drive loss
+P_quiet = 0.018        # W, controller quiescent
+
+# -------------------------------------------------------------
+# Loss model as a function of output current.
+# Continuous-conduction mode (CCM) assumed across the full range.
+# -------------------------------------------------------------
+def losses(I_out):
+    # Duty cycle including device drops (asynchronous buck)
+    D = (V_out + V_F) / (V_in - I_out * R_dson + V_F)
+
+    # RMS currents
+    I_L_rms   = np.sqrt(I_out**2 + delta_iL**2 / 12.0)   # inductor
+    I_cout_rms = delta_iL / np.sqrt(12.0)                # output cap (ripple only)
+    I_cin_rms  = I_out * np.sqrt(D * (1 - D))            # input cap (pulsed)
+
+    # Individual loss terms
+    P_diode = I_out * V_F * (1 - D)                      # Schottky conduction
+    P_fet_c = I_out**2 * R_dson * D                      # FET conduction
+    P_fet_s = 0.5 * V_in * I_out * t_sw * fsw            # FET switching
+    P_dcr   = I_L_rms**2 * DCR                           # inductor DCR
+    P_esr   = I_cout_rms**2 * R_esr_out + I_cin_rms**2 * R_esr_in
+
+    P_total = (P_diode + P_fet_c + P_fet_s + P_dcr + P_esr
+               + P_core + P_gate + P_quiet)
+    return P_total, D
+
+# -------------------------------------------------------------
+# Sweep load current and compute efficiency
+# -------------------------------------------------------------
+I_sweep = np.linspace(0.1, 3.0, 300)
+eff = np.zeros_like(I_sweep)
+for i, I in enumerate(I_sweep):
+    P_loss, _ = losses(I)
+    P_out = V_out * I
+    eff[i] = 100.0 * P_out / (P_out + P_loss)
+
+# Full-load point (for annotation and a sanity check against the report)
+P_loss_full, D_full = losses(3.0)
+eff_full = 100.0 * (V_out * 3.0) / (V_out * 3.0 + P_loss_full)
+
+print("Full-load check (I_out = 3 A):")
+print(f"  Duty cycle D   = {D_full:.3f}")
+print(f"  Total loss     = {P_loss_full:.3f} W")
+print(f"  Output power   = {V_out*3.0:.1f} W")
+print(f"  Efficiency     = {eff_full:.1f} %")
+print(f"  Peak efficiency over sweep = {eff.max():.1f} % "
+      f"at {I_sweep[np.argmax(eff)]:.2f} A")
+
+# -------------------------------------------------------------
+# Plot
+# -------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(10, 6))
+
+ax.plot(I_sweep, eff, 'b-', linewidth=2)
+ax.axhline(90, color='gray', linestyle=':', alpha=0.7,
+           label='90% target')
+ax.plot(3.0, eff_full, 'ro', markersize=8,
+        label=f'Full load: {eff_full:.1f}% at 3 A')
+ax.annotate(f'{eff_full:.1f}%',
+            xy=(3.0, eff_full),
+            xytext=(2.5, eff_full - 4),
+            fontsize=11, fontweight='bold')
+
+ax.set_xlabel('Output Current (A)')
+ax.set_ylabel('Efficiency (%)')
+ax.set_title('Calculated Efficiency vs Load Current — TPS54360 12V->5V Buck (Vin = 12 V)')
+ax.set_xlim(0, 3.1)
+ax.set_ylim(70, 95)
+ax.grid(which='both', alpha=0.4)
+ax.legend(loc='lower right')
+
+plt.tight_layout()
+plt.savefig('efficiency_plot.png', dpi=150, bbox_inches='tight')
+print("\nSaved: efficiency_plot.png")
+plt.show()

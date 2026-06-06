@@ -1,0 +1,161 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal
+
+# -------------------------------------------------------------
+# Plant parameters (from Day 6 calculations) — same as plant_bode.py
+# -------------------------------------------------------------
+gm_ps  = 12.0          # A/V, power stage transconductance (datasheet pg. 7)
+V_out  = 5.0           # V
+I_out  = 3.0           # A
+R_L    = V_out / I_out # ohms, load resistance at full load
+C_out  = 66e-6         # F, effective output capacitance (after derating)
+R_esr  = 1.5e-3        # ohms, parallel ESR of two ceramic caps
+
+# -------------------------------------------------------------
+# Error amplifier + feedback parameters
+# -------------------------------------------------------------
+gm_ea  = 350e-6        # A/V, error amplifier transconductance (datasheet)
+V_ref  = 0.8           # V, internal reference
+# Feedback divider attenuation: V_ref / V_out
+H_fb   = V_ref / V_out
+
+# -------------------------------------------------------------
+# Type II compensator components (from Day 8 calculations)
+# -------------------------------------------------------------
+R_comp = 30.9e3        # ohms
+C_comp = 3.3e-9        # F
+C_hf   = 22e-12        # F
+
+# -------------------------------------------------------------
+# Plant transfer function (V_out / V_COMP)
+# -------------------------------------------------------------
+A_dc = gm_ps * R_L
+f_p  = 1.0 / (2 * np.pi * R_L * C_out)
+f_z  = 1.0 / (2 * np.pi * R_esr * C_out)
+
+wz_plant = 2 * np.pi * f_z
+wp_plant = 2 * np.pi * f_p
+
+num_plant = [A_dc / wz_plant, A_dc]
+den_plant = [1.0 / wp_plant, 1.0]
+G_plant = signal.TransferFunction(num_plant, den_plant)
+
+# -------------------------------------------------------------
+# Compensator transfer function (Type II)
+#   Gc(s) = gm_ea * H_fb * (1 + s*R_comp*C_comp)
+#                          ---------------------------------------------
+#                          s*(C_comp + C_hf)*(1 + s*R_comp*Chf_parallel)
+#   where the high-frequency pole uses C_comp||C_hf
+# -------------------------------------------------------------
+C_par = (C_comp * C_hf) / (C_comp + C_hf)   # series combo for HF pole
+
+# Compensator zero and poles
+f_zc = 1.0 / (2 * np.pi * R_comp * C_comp)            # comp zero
+f_pc = 1.0 / (2 * np.pi * R_comp * C_par)             # comp HF pole
+# (origin pole from the integrator)
+
+# Mid-band gain factor
+K = gm_ea * H_fb
+
+wzc = 2 * np.pi * f_zc
+wpc = 2 * np.pi * f_pc
+
+# Gc(s) = K * (1 + s/wzc) / [ s*(C_comp+C_hf) * (1 + s/wpc) ] ... but
+# build cleanly as numerator/denominator in s using transconductance form:
+#   Gc(s) = (K/(C_comp+C_hf)) * (1 + s/wzc) / ( s * (1 + s/wpc) )
+Gc_gain = K / (C_comp + C_hf)
+
+num_comp = [Gc_gain / wzc, Gc_gain]          # Gc_gain*(s/wzc + 1)
+den_comp = [1.0 / wpc, 1.0, 0.0]             # s*(s/wpc + 1) = s^2/wpc + s
+G_comp = signal.TransferFunction(num_comp, den_comp)
+
+# -------------------------------------------------------------
+# Loop transfer function: T(s) = G_plant(s) * G_comp(s)
+# -------------------------------------------------------------
+num_loop = np.polymul(G_plant.num, G_comp.num)
+den_loop = np.polymul(G_plant.den, G_comp.den)
+T_loop = signal.TransferFunction(num_loop, den_loop)
+
+# -------------------------------------------------------------
+# Sweep frequency
+# -------------------------------------------------------------
+freq_hz = np.logspace(0, 7, 2000)
+omega   = 2 * np.pi * freq_hz
+
+w_out, mag_db, phase_deg = signal.bode(T_loop, omega)
+freq_out = w_out / (2 * np.pi)
+
+# -------------------------------------------------------------
+# Current-mode sampling (sample-and-hold) phase lag
+# Peak current-mode control samples the inductor current once per switching
+# cycle. Ridley's model represents this sample-and-hold as an additional
+# phase delay that grows with frequency, approaching its worst case near the
+# Nyquist frequency (fsw/2). It contributes negligible magnitude change but
+# meaningful phase lag near crossover, which the rational plant model omits.
+# -------------------------------------------------------------
+fsw   = 500e3                       # Hz, switching frequency
+f_nyq = fsw / 2.0                   # Nyquist frequency
+# Phase lag approximation: linear delay referenced to the Nyquist frequency.
+phase_sample = -90.0 * (freq_out / f_nyq)   # degrees
+phase_deg = phase_deg + phase_sample
+
+# -------------------------------------------------------------
+# Find crossover frequency (where |T| = 0 dB) and phase margin
+# -------------------------------------------------------------
+crossover_idx = np.argmin(np.abs(mag_db))
+f_co_actual   = freq_out[crossover_idx]
+phase_at_co   = phase_deg[crossover_idx]
+phase_margin  = 180 + phase_at_co   # PM = 180 + phase (phase is negative)
+
+print("Compensator parameters:")
+print(f"  R_COMP = {R_comp/1e3:.1f} kohms")
+print(f"  C_COMP = {C_comp*1e9:.1f} nF")
+print(f"  C_HF   = {C_hf*1e12:.0f} pF")
+print()
+print(f"  Comp zero f_zc = {f_zc:.0f} Hz  (cancels plant pole at {f_p:.0f} Hz)")
+print(f"  Comp pole f_pc = {f_pc/1e3:.0f} kHz")
+print()
+print("Loop results:")
+print(f"  Crossover frequency = {f_co_actual/1e3:.1f} kHz")
+print(f"  Phase at crossover  = {phase_at_co:.1f} deg")
+print(f"  PHASE MARGIN        = {phase_margin:.1f} deg")
+
+# -------------------------------------------------------------
+# Plot
+# -------------------------------------------------------------
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+ax1.semilogx(freq_out, mag_db, 'b-', linewidth=2)
+ax1.axhline(0, color='gray', linestyle=':', alpha=0.7)
+ax1.axvline(f_co_actual, color='purple', linestyle='--', alpha=0.7,
+            label=f'Crossover {f_co_actual/1e3:.1f} kHz')
+ax1.set_ylabel('Loop Gain (dB)')
+ax1.set_title('Loop Transfer Function T(s) = Plant x Compensator — TPS54360 buck')
+ax1.grid(which='both', alpha=0.4)
+ax1.legend(loc='upper right')
+
+ax2.semilogx(freq_out, phase_deg, 'b-', linewidth=2)
+ax2.axhline(-180, color='red', linestyle=':', alpha=0.7,
+            label='-180 deg')
+ax2.axvline(f_co_actual, color='purple', linestyle='--', alpha=0.7)
+ax2.annotate(f'PM = {phase_margin:.0f}°',
+             xy=(f_co_actual, phase_at_co),
+             xytext=(f_co_actual*1.5, phase_at_co + 40),
+             arrowprops=dict(arrowstyle='->', color='black'),
+             fontsize=11, fontweight='bold')
+ax2.set_xlabel('Frequency (Hz)')
+ax2.set_ylabel('Phase (degrees)')
+ax2.grid(which='both', alpha=0.4)
+ax2.legend(loc='upper right')
+
+# Cap the frequency axis at 1 MHz. The sampling-lag phase term is only
+# physically meaningful near and below crossover; cropping here keeps the
+# plot focused on the region that determines stability.
+ax1.set_xlim(1, 1e6)
+ax2.set_xlim(1, 1e6)
+
+plt.tight_layout()
+plt.savefig('loop_bode.png', dpi=150, bbox_inches='tight')
+print("\nSaved: loop_bode.png")
+plt.show()
